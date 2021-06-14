@@ -1,2 +1,2 @@
-# CSF-proteomics-targeted-for-CNS-processes-in-bipolar-disorder
+# Cerebrospinal fluid proteomics targeted for central nervous system processes in bipolar disorder
 Code for manuscript "Cerebrospinal fluid proteomics targeted for central nervous system processes in bipolar disorder" submitted to Molecular Psychiatry
