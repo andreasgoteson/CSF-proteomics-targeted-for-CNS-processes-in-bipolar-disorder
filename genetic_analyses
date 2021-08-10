@@ -1,0 +1,199 @@
+## Genome-wide association analyses for Olink protein data
+## For CSF proteomics targeted for CNS processes in bipolar disorder in Mol Psych
+## Correspondence: andreas.goteson@gu.se
+
+## As the original dataset is not published, this is a generic version where I compiled
+## multiple small scripts for analyses in plink2, metal, and R. 
+
+##############################
+### Bash script for plink2 ###
+##############################
+
+#!/bin/bash
+
+gendir="..."
+
+# Run analyses 
+for wave in wave1 wave2 wave3; do
+    plink2 \
+        --pfile $gendir/plink2.$wave.vcfs/filtered.chr_merged \
+        --pheno forGWAS_cc \
+        --covar forGWAS_cov \
+        --covar-variance-standardize \
+        --chr 1-22 \
+        --extract-if-info "INFO >= 0.6" \
+        --hwe 1e-10 \
+        --glm hide-covar cols=+ax,+a1count,+a1freq \
+        --out $wave
+
+done
+
+### Filter output to remove SE=NA and where allele count is just 1
+### And re-annotate variant "." to CHR:POS_REF_ALT
+ls *.glm.linear > gwas_files
+
+while read file; do
+    echo "Process $file"
+    awk -v OFS='\t' '{
+    if ($13=="NA" || $8<1.5) 
+        next;
+    else if ($3==".") 
+        print $1, $2, $1":"$2"_"$4"_"$5, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16;
+    else 
+        print;
+    }' $file > $file.filtered
+done < gwas_files
+
+rm gwas_files
+
+
+
+
+
+
+
+
+
+
+######################################
+### Metal script for meta-analyses ###
+######################################
+
+SCHEME   STDERR
+STDERR   SE
+AVERAGEFREQ ON
+ 
+#Describe the wave input files
+
+MARKER   ID
+WEIGHT   OBS_CT
+ALLELE   A1 AX
+FREQ     A1_FREQ
+EFFECT   BETA
+STDERR	 SE
+PVAL     P
+PROCESS wave1.PHENO.glm.linear.filtered
+
+MARKER   ID
+WEIGHT   OBS_CT
+ALLELE   A1 AX
+FREQ     A1_FREQ
+EFFECT   BETA
+STDERR   SE
+PVAL     P
+PROCESS wave2.PHENO.glm.linear.filtered
+
+MARKER   ID
+WEIGHT   OBS_CT
+ALLELE   A1 AX
+FREQ     A1_FREQ
+EFFECT   BETA
+STDERR   SE
+PVAL     P
+PROCESS wave3.PHENO.glm.linear.filtered
+
+OUTFILE PHENO.metal .tbl
+
+# Execute meta-analysis
+ANALYZE
+
+
+
+
+
+
+
+
+
+
+
+#####################################################
+### R script to annotate the meta-analysis output ###
+#####################################################
+
+args = commandArgs(trailingOnly=TRUE)
+
+# Lookup table to convert gene names to protein names
+nameTab = data.frame(
+    GENE = c("CLEC1B", "DRAXIN", "SPOCK1", "TNFRSF21"),
+    Protein = c("CLEC1B", "Draxin", "Testican-1", "TNRSF21")
+)
+
+this_prot = nameTab[nameTab$GENE==args[1],"Protein"]
+
+# Load packages
+suppressMessages(library(tidyverse))
+suppressMessages(library(qqman))
+
+### PROCESS FILES
+
+# Read files into R: metal output filtered by wave and a list of genomic positions
+cat("\n### Read files into R")
+
+### Read metal file
+metal = read_tsv(paste0(args[1],".metal1.tbl"), progress=T,
+    col_names = c("SNP", "A1", "A2", "FREQ1", "FREQSE", "BETA", "SE", "P", "Direction")) %>%
+    # Remove SNPs in just one wave
+    filter(str_count(Direction, "\\?")<2) %>%
+    filter(FREQ1 >= 0.045 & FREQ1 < 0.955) %>% 
+    mutate_at(c("A1", "A2"), toupper)
+
+### Read list of genomic positions
+chrposid = read_delim("/Volumes/t5/swebic_genomics/chrposid", delim=" ", 
+    progress=T, col_names = c("CHR", "BP", "SNP"))
+
+### Join the two files
+metal.annotated = inner_join(
+    chrposid %>% filter(!is.na(CHR)), 
+    metal) %>%
+    # Make numeric (required for qqman plots)
+    mutate_at(c("CHR", "BP", "BETA", "SE", "P"), as.numeric) %>%
+    distinct %>%
+    # Column order
+    dplyr::select(CHR, BP, SNP, A1, A2, FREQ1, FREQSE, BETA, SE, P, Direction)
+
+### EXPORT TABLES
+
+# Write file of all annotated SNPs
+metal.annotated %>% arrange(CHR, BP) %>% write_tsv(paste0(args[1],".metal_annotated.tsv"))
+
+# Write a file with top100 SNPs
+metal.annotated %>% arrange(P) %>% slice(1:100) %>% write_tsv(paste0(args[1],".metal_top100.tsv"))
+
+# Write a file with the 64 SNPs from Mullins et. al 2021 Nat Gen
+mullins64 = read_delim("~/Desktop/SBP-olink-neuro/mullins64_chrpos", delim=" ")
+metal.annotated %>% inner_join(mullins64) %>% write_tsv(paste0(args[1],".mullins64.tsv"))
+
+cat("\n### Done: exported annotated tables\n")
+
+### PLOTS
+
+# Manhattan
+png(paste0(this_prot,".manhattan.png"), width=900, height=480)
+manhattan(metal.annotated, main = paste0("Manhattan plot: ", this_prot))
+dev.off()
+
+# QQ
+png(paste0(this_prot,".qq.png"), width=480, height=360)
+qq(metal.annotated$P, main = paste0("Q-Q plot: ", this_prot))
+dev.off()
+
+cat("\n### Done: printed plots")
+
+
+
+
+
+
+
+
+
+##################################################
+### Magma command-line for gene-based analyses ###
+##################################################
+
+awk '{print $3, $1, $2}' ../metal/TNFRSF21.metal_annotated.tsv > metal.snploc
+magma --annotate window=10,2.5 --snp-loc metal.snploc --gene-loc NCBI37.3.gene.loc --out metal
+magma --bfile g1000_eur --gene-annot metal.genes.annot --pval ../metal/TNFRSF21.metal_annotated.tsv N=262 --out tnfrsf21
+
+## and sim. for the other proteins tested
